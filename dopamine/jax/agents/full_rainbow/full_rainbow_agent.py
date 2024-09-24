@@ -255,6 +255,9 @@ class JaxFullRainbowAgent(dqn_agent.JaxDQNAgent):
       num_updates_per_train_step=1,
       network=networks.FullRainbowNetwork,
       num_atoms=51,
+      net_conf='classic',
+      min_vals=None,
+      max_vals=None,
       vmax=10.0,
       vmin=None,
       epsilon_fn=dqn_agent.linearly_decaying_epsilon,
@@ -318,6 +321,9 @@ class JaxFullRainbowAgent(dqn_agent.JaxDQNAgent):
     self._distributional = distributional
     self._mse_loss = mse_loss
     self._num_updates_per_train_step = num_updates_per_train_step
+    self._net_conf = net_conf
+    self._min_vals = min_vals
+    self._max_vals = max_vals
 
     super().__init__(
         num_actions=num_actions,
@@ -327,6 +333,9 @@ class JaxFullRainbowAgent(dqn_agent.JaxDQNAgent):
             noisy=self._noisy,
             dueling=self._dueling,
             distributional=self._distributional,
+            net_conf=self._net_conf,
+            min_vals=self._min_vals,
+            max_vals=self._max_vals
         ),
         epsilon_fn=zero_epsilon if self._noisy else epsilon_fn,
         summary_writer=summary_writer,

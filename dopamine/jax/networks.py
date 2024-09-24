@@ -550,6 +550,9 @@ class FullRainbowNetwork(nn.Module):
 
   num_actions: int
   num_atoms: int
+  net_conf: str
+  min_vals: int
+  max_vals: int
   noisy: bool = True
   dueling: bool = True
   distributional: bool = True
@@ -561,23 +564,44 @@ class FullRainbowNetwork(nn.Module):
     if key is None:
       key = jax.random.PRNGKey(int(time.time() * 1e6))
 
-    if not self.inputs_preprocessed:
-      x = preprocess_atari_inputs(x)
-
-    hidden_sizes = [32, 64, 64]
-    kernel_sizes = [8, 4, 3]
-    stride_sizes = [4, 2, 1]
-    for hidden_size, kernel_size, stride_size in zip(
-        hidden_sizes, kernel_sizes, stride_sizes
-    ):
-      x = nn.Conv(
-          features=hidden_size,
-          kernel_size=(kernel_size, kernel_size),
-          strides=(stride_size, stride_size),
-          kernel_init=nn.initializers.xavier_uniform(),
-      )(x)
-      x = nn.relu(x)
-    x = x.reshape((-1))  # flatten
+    if self.net_conf == 'atari':
+      if not self.inputs_preprocessed:
+        x = preprocess_atari_inputs(x)
+    
+      hidden_sizes = [32, 64, 64]
+      kernel_sizes = [8, 4, 3]
+      stride_sizes = [4, 2, 1]
+      
+      for hidden_size, kernel_size, stride_size in zip(
+          hidden_sizes, kernel_sizes, stride_sizes
+      ):
+        x = nn.Conv(
+            features=hidden_size,
+            kernel_size=(kernel_size, kernel_size),
+            strides=(stride_size, stride_size),
+            kernel_init=nn.initializers.xavier_uniform(),
+        )(x)
+        x = nn.relu(x)
+      x = x.reshape((-1))  # flatten
+    
+    elif self.net_conf == 'minatar':
+      x = x.squeeze(3)
+      x = x.astype(jnp.float32)
+      x = nn.Conv(features=16, kernel_size=(3, 3), strides=(1, 1),  kernel_init=self.initzer)(x)
+      x = jax.nn.relu(x)
+      x = x.reshape((-1))
+    
+    elif self.net_conf == 'classic':
+      #classic environments
+      x = x.astype(jnp.float32)
+      x = x.reshape((-1))
+      
+      if self.min_vals is not None:
+        min_vals = jnp.array(self.min_vals)
+        max_vals = jnp.array(self.max_vals)
+        x -= min_vals
+        x /= max_vals - min_vals
+        x = 2.0 * x - 1.0
 
     net = feature_layer(key, self.noisy, eval_mode=eval_mode)
     x = net(x, features=512)  # Single hidden layer of size 512

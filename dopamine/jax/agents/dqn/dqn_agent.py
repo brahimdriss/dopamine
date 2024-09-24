@@ -34,6 +34,8 @@ import numpy as onp
 import optax
 import tensorflow as tf
 
+from flax import linen as nn
+
 
 NATURE_DQN_OBSERVATION_SHAPE = dqn_agent.NATURE_DQN_OBSERVATION_SHAPE
 NATURE_DQN_DTYPE = jnp.uint8
@@ -90,7 +92,7 @@ def create_optimizer(
     raise ValueError('Unsupported optimizer {}'.format(name))
 
 
-@functools.partial(jax.jit, static_argnums=(0, 3, 10, 11))
+@functools.partial(jax.jit, static_argnums=(0, 3, 10, 11, 12))
 def train(
     network_def,
     online_params,
@@ -104,6 +106,10 @@ def train(
     terminals,
     cumulative_gamma,
     loss_type='mse',
+    target_opt=0, 
+    tau=0.03,  
+    alpha=0.9,  
+    clip_value_min=-1.0
 ):
   """Run the training step."""
 
@@ -118,10 +124,23 @@ def train(
       return jnp.mean(jax.vmap(losses.huber_loss)(target, replay_chosen_q))
     return jnp.mean(jax.vmap(losses.mse_loss)(target, replay_chosen_q))
 
+
+  # rng, rng2, rng3  = jax.random.split(rng, 3)
+
   def q_target(state):
     return network_def.apply(target_params, state)
+  
+  def q_target_online(state):
+    return network_def.apply(online_params, state)
 
-  target = target_q(q_target, next_states, rewards, terminals, cumulative_gamma)
+  if target_opt == 0:
+      target = target_q(q_target, next_states, rewards, terminals, cumulative_gamma)
+  elif target_opt == 1:
+      target = target_m_dqn(q_target_online, q_target, states, next_states, actions, rewards, terminals,
+                            cumulative_gamma, tau, alpha, clip_value_min)
+  else:
+      raise ValueError(f"Unsupported target option {target_opt}")
+    
   grad_fn = jax.value_and_grad(loss_fn)
   loss, grad = grad_fn(online_params, target)
   updates, optimizer_state = optimizer.update(
@@ -130,6 +149,48 @@ def train(
   online_params = optax.apply_updates(online_params, updates)
   return optimizer_state, online_params, loss
 
+def stable_scaled_log_softmax(x, tau, axis=-1):
+  max_x = jnp.amax(x, axis=axis, keepdims=True)
+  y = x - max_x
+  tau_lse = max_x + tau * jnp.log(jnp.sum(jnp.exp(y / tau), axis=axis, keepdims=True))
+  return x - tau_lse
+
+def stable_softmax(x, tau, axis=-1):
+  max_x = jnp.amax(x, axis=axis, keepdims=True)
+  y = x - max_x
+  return nn.softmax(y/tau, axis=axis)
+
+def target_m_dqn(model, target_network, states, next_states, actions,rewards, terminals, 
+                cumulative_gamma,tau,alpha,clip_value_min):
+  """Compute the target Q-value. Munchausen DQN"""
+  
+  #----------------------------------------
+  q_state_values = jax.vmap(target_network, in_axes=(0))(states).q_values
+  q_state_values = jnp.squeeze(q_state_values)
+  
+  next_q_values = jax.vmap(target_network, in_axes=(0))(next_states).q_values
+  next_q_values = jnp.squeeze(next_q_values)
+  #----------------------------------------
+
+  tau_log_pi_next =  stable_scaled_log_softmax(next_q_values, tau, axis=1)
+  pi_target = stable_softmax(next_q_values,tau, axis=1)
+  replay_log_policy = stable_scaled_log_softmax(q_state_values, tau, axis=1)
+
+  #----------------------------------------
+  
+  replay_next_qt_softmax = jnp.sum((next_q_values-tau_log_pi_next)*pi_target,axis=1)
+
+  replay_action_one_hot = nn.one_hot(actions, q_state_values.shape[-1])
+  tau_log_pi_a = jnp.sum(replay_log_policy * replay_action_one_hot, axis=1)
+
+  #a_max=1
+  tau_log_pi_a = jnp.clip(tau_log_pi_a, a_min=clip_value_min,a_max=1)
+
+  munchausen_term = alpha * tau_log_pi_a
+  modified_bellman = (rewards + munchausen_term +cumulative_gamma * replay_next_qt_softmax *
+        (1. - jnp.float32(terminals)))
+  
+  return jax.lax.stop_gradient(modified_bellman)
 
 def target_q(target_network, next_states, rewards, terminals, cumulative_gamma):
   """Compute the target Q-value."""
@@ -254,6 +315,10 @@ class JaxDQNAgent(object):
       epsilon_train=0.01,
       epsilon_eval=0.001,
       epsilon_decay_period=250000,
+      target_opt=0,
+      tau=0.03,
+      alpha=1,
+      clip_value_min=-10,
       eval_mode=False,
       optimizer='adam',
       summary_writer=None,
@@ -354,6 +419,10 @@ class JaxDQNAgent(object):
     self.update_period = update_period
     self.eval_mode = eval_mode
     self.training_steps = 0
+    self.target_opt = target_opt
+    self.tau=0.03
+    self.alpha=1
+    self.clip_value_min=-10
     if isinstance(summary_writer, str):
       try:
         tf.compat.v1.enable_v2_behavior()
@@ -549,6 +618,10 @@ class JaxDQNAgent(object):
             self.replay_elements['terminal'],
             self.cumulative_gamma,
             self._loss_type,
+            target_opt=self.target_opt,
+            tau=self.tau,
+            alpha=self.alpha,
+            clip_value_min=self.clip_value_min
         )
         if (
             self.summary_writer is not None
